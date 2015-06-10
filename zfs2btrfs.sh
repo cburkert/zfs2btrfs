@@ -2,7 +2,8 @@
 
 set -eu
 
-VERBOSE="yes"
+VERBOSE=1
+#DEBUG=1
 
 function convert() {
   local zvol=${1:?zfs volume required}
@@ -24,6 +25,13 @@ do
     for snap in `zfs list -r -t snap -H -o name "$sub"`
     do
       local snaplabel=${snap#$sub@}
+      if [[ -e "$bsubvol/$snaplabel" ]]
+      then
+        echo_info "snapshot already exists. skip..."
+        prevsnap="$snap"
+        continue
+      fi
+
       echo_info "Converting subvolume $relsubname snapshot $snaplabel..."
       if [[ -z "$prevsnap" ]]
       then
@@ -35,10 +43,8 @@ do
         zfs diff -H -F "$prevsnap" "$snap" | tee /tmp/log | \
           while read -r changetype filetype rawpath renamepath
         do
-          #local changetype=`cut -sf 1 <<<"$change"`
-          #local filetype=`cut -sf 2 <<<"$change"`
-          #local rawpath=`cut -sf 3 <<<"$change"`
-          #local renamepath=`cut -sf 4 <<<"$change"`
+          echo_debug "diff: $changetype $filetype $rawpath $renamepath"
+          eval rawpath=\$\'$rawpath\' # zfs diff uses octal encoding for spaces
           local path="${rawpath#$mountpoint}"
           local zpath="$mountpoint/.zfs/snapshot/$snaplabel/$path"
           local bpath="$bsubvol/$path"
@@ -46,7 +52,7 @@ do
           apply_change "$changetype" "$filetype" "$zpath" "$bpath" "$brenamepath"
         done
       fi
-      echo btrfs subvolume snapshot -r "$bsubvol" "$bsubvol/$snaplabel"
+      echo_debug btrfs subvolume snapshot -r "$bsubvol" "$bsubvol/$snaplabel"
       btrfs subvolume snapshot -r "$bsubvol" "$bsubvol/$snaplabel"
       prevsnap="$snap"
     done
@@ -59,7 +65,7 @@ function apply_change() {
   local zpath=${3:?zfs path missing}
   local bpath=${4:?btrfs path missing}
   local brenamepath=${5:-}
-  echo $@
+  echo_debug "Apply change: $@"
 
   case "$changetype" in
     "-") rm -rf "$bpath";;
@@ -74,7 +80,7 @@ function apply_creation() {
   local filetype=${1:?filetype missing}
   local zpath=${2:?zfs path missing}
   local bpath=${3:?btrfs path missing}
-  echo $@
+  echo_debug "Apply creation: $@"
 
   case "$filetype" in
     "/") mkdir -p "$bpath";;
@@ -87,7 +93,7 @@ function apply_modification() {
   local filetype=${1:?filetype missing}
   local zpath=${2:?zfs path missing}
   local bpath=${3:?btrfs path missing}
-  echo $@
+  echo_debug "Apply mod: $@"
 
   case "$filetype" in
     "/") true;; # currently no changes to directories besides contained files are supported
@@ -97,7 +103,11 @@ function apply_modification() {
 }
 
 function echo_info {
-  [[ -n "$VERBOSE" ]] && echo $@
+  [[ -v VERBOSE ]] && echo $@ || true
+}
+
+function echo_debug {
+  [[ -v DEBUG ]] && echo $@ || true
 }
 
 convert $@
