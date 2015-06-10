@@ -1,9 +1,33 @@
 #!/bin/bash
 
-set -eu
 
-VERBOSE=1
-#DEBUG=1
+PROG="${0##*/}"
+VERSION="0.0" # not released yet
+
+set -eu
+trap unexpected_err ERR
+
+function unexpected_err() {
+  echo "An unexpected error has occured at line '$BASH_LINENO'. Please report." >&2
+  exit 99
+}
+
+function usage() {
+  cat <<EOF
+usage: $PROG [options] <zfs volume> <btrfs volume>
+
+Transfers given ZFS volume to Btrfs target.
+
+$PROG provides options:
+  Output
+    -h     Shows this usage dialog
+    -m     Set difference calculation mode:
+            rsync Use rsync (slower but more stable; default)
+            zfs   Use zfs diff (zfsonlinux has a bug here)
+    -v     Verbose output
+    -d     Debug output
+EOF
+}
 
 function convert() {
   local zvol=${1:?zfs volume required}
@@ -38,19 +62,25 @@ do
         # copy everythink for this is the first snapshot
         cp -a "$mountpoint/.zfs/snapshot/$snaplabel/." "$bsubvol"
       else
-        # apply zfs changes to btrfs
-        IFS=$'\t'
-        zfs diff -H -F "$prevsnap" "$snap" | tee /tmp/log | \
-          while read -r changetype filetype rawpath renamepath
-        do
-          echo_debug "diff: $changetype $filetype $rawpath $renamepath"
-          eval rawpath=\$\'$rawpath\' # zfs diff uses octal encoding for spaces
-          local path="${rawpath#$mountpoint}"
-          local zpath="$mountpoint/.zfs/snapshot/$snaplabel/$path"
-          local bpath="$bsubvol/$path"
-          local brenamepath="$bsubvol/${renamepath#$mountpoint}"
-          apply_change "$changetype" "$filetype" "$zpath" "$bpath" "$brenamepath"
-        done
+        if [[ "$MODE" == "zfsdiff" ]]
+        then
+          # apply zfs changes to btrfs
+          IFS=$'\t'
+          zfs diff -H -F "$prevsnap" "$snap" | tee /tmp/log | \
+            while read -r changetype filetype rawpath renamepath
+          do
+            echo_debug "diff: $changetype $filetype $rawpath $renamepath"
+            eval rawpath=\$\'$rawpath\' # zfs diff uses octal encoding for spaces
+            local path="${rawpath#$mountpoint}"
+            local zpath="$mountpoint/.zfs/snapshot/$snaplabel/$path"
+            local bpath="$bsubvol/$path"
+            local brenamepath="$bsubvol/${renamepath#$mountpoint}"
+            apply_change "$changetype" "$filetype" "$zpath" "$bpath" "$brenamepath"
+          done
+        else
+          # use rsync
+          rsync -ac --delete ${VERBOSE:+--progress} "$mountpoint/.zfs/snapshot/$snaplabel/" "$bsubvol"
+        fi
       fi
       echo_debug btrfs subvolume snapshot -r "$bsubvol" "$bsubvol/$snaplabel"
       btrfs subvolume snapshot -r "$bsubvol" "$bsubvol/$snaplabel"
@@ -102,12 +132,51 @@ function apply_modification() {
   esac
 }
 
-function echo_info {
+function echo_info() {
   [[ -v VERBOSE ]] && echo $@ || true
 }
 
-function echo_debug {
+function echo_debug() {
   [[ -v DEBUG ]] && echo $@ || true
 }
+
+function set_diff_mode() {
+  case ${1:-rsync} in
+    rsync)
+      MODE="rsync"
+      ;;
+    zfs)
+      MODE="zfsdiff"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+
+while getopts ":dhm:v" opt; do
+  case $opt in
+    d)
+      DEBUG=1
+      ;;
+    h)
+      usage
+      exit 0
+      ;;
+    m)
+      set_diff_mode $OPTARG || { echo "Unknown mode $OPTARG" >&2; usage; exit 1; }
+      ;;
+    v)
+      VERBOSE=1
+      ;;
+    \?)
+      echo "Invalid option: -$OPTARG" >&2
+      usage
+      exit 1
+      ;;
+  esac
+done
 
 convert $@
